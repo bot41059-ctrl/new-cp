@@ -965,9 +965,10 @@ def finalize_download_task(task_id: str, keys_string: str = ""):
             task["progress"] = 0.0
             logger.info(f"Task {task_id}: Starting auto-upload to YouTube...")
 
-            def yt_progress(pct):
+            def yt_progress(pct, spd=""):
                 task["progress"] = pct
-                task["speed_str"] = f"YouTube: {pct}%"
+                speed_txt = f" ({spd})" if spd else ""
+                task["speed_str"] = f"YouTube: {pct}%{speed_txt}"
 
             yt_title = task.get("display_title") or friendly_name
             if YOUTUBE_UPLOADER_AVAILABLE:
@@ -1500,9 +1501,10 @@ def background_yt_upload(task_id: str):
     task["speed_str"] = "Uploading to YouTube..."
     task["progress"] = 0.0
 
-    def yt_progress(pct):
+    def yt_progress(pct, spd=""):
         task["progress"] = pct
-        task["speed_str"] = f"YouTube: {pct}%"
+        speed_txt = f" ({spd})" if spd else ""
+        task["speed_str"] = f"YouTube: {pct}%{speed_txt}"
 
     yt_title = task.get("display_title") or task.get("friendly_filename") or "Uploaded Video"
     if YOUTUBE_UPLOADER_AVAILABLE:

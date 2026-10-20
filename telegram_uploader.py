@@ -189,15 +189,21 @@ async def upload_video_to_telegram(
                 else:
                     progress_callback(pct, speed_str)
 
-    # 3. Create temporary in-memory client
+    # 3. Create high-speed temporary in-memory client (16 workers for multi-connection speed)
     session_name = f"omni_uploader_{int(time.time() * 1000) % 100000}"
-    client = Client(
-        name=session_name,
-        api_id=api_id_int,
-        api_hash=api_hash_clean,
-        bot_token=bot_token_clean,
-        in_memory=True
-    )
+    client_params = {
+        "name": session_name,
+        "api_id": api_id_int,
+        "api_hash": api_hash_clean,
+        "bot_token": bot_token_clean,
+        "in_memory": True,
+        "workers": 16,
+    }
+    # Auto-enable max_concurrent_transmissions if supported by Pyrofork
+    try:
+        client = Client(**client_params, max_concurrent_transmissions=8)
+    except TypeError:
+        client = Client(**client_params)
 
     try:
         logger.info(f"Connecting to Telegram MTProto for chat: {target_chat}...")

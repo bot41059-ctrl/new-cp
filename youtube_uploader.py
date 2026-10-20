@@ -165,8 +165,19 @@ def upload_video_to_youtube(
 
     logger.info(f"Initiating YouTube upload for '{clean_title}' (Status: {status_choice})...")
 
-    # Resumable upload chunk size: 5 MB (5 * 1024 * 1024)
-    chunk_size = 5 * 1024 * 1024
+    # ⚡ Ultra-fast dynamic chunk sizing (Multiples of 256 KB)
+    # Higher chunk sizes saturate gigabit connections, eliminating HTTP round-trip latency
+    file_bytes = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+    if file_bytes > 500 * 1024 * 1024:
+        chunk_size = 64 * 1024 * 1024  # 64 MB chunks for large videos (> 500MB)
+    elif file_bytes > 100 * 1024 * 1024:
+        chunk_size = 32 * 1024 * 1024  # 32 MB chunks for medium videos (> 100MB)
+    elif file_bytes > 20 * 1024 * 1024:
+        chunk_size = 16 * 1024 * 1024  # 16 MB chunks
+    else:
+        chunk_size = 8 * 1024 * 1024   # 8 MB chunks for smaller videos
+
+    logger.info(f"Using high-speed upload chunk size: {chunk_size // (1024 * 1024)} MB")
     media = MediaFileUpload(file_path, chunksize=chunk_size, resumable=True)
 
     request = youtube.videos().insert(
@@ -177,17 +188,28 @@ def upload_video_to_youtube(
 
     response = None
     last_reported = -1
+    upload_start = time.time()
 
     while response is None:
         try:
             status, response = request.next_chunk()
             if status:
                 percent = round(status.progress() * 100, 1)
+                now = time.time()
+                elapsed = max(0.1, now - upload_start)
+                uploaded_bytes = int(status.progress() * file_bytes) if file_bytes > 0 else 0
+                speed = uploaded_bytes / elapsed if elapsed > 0 else 0
+                spd_str = f"{format_bytes(speed)}/s" if speed > 0 else ""
+
                 if percent != last_reported:
                     last_reported = percent
-                    logger.info(f"YouTube Upload Progress: {percent}%")
+                    logger.info(f"YouTube Upload Progress: {percent}% ({spd_str})")
                     if progress_callback:
-                        progress_callback(percent)
+                        try:
+                            # Support both single-arg and dual-arg callbacks
+                            progress_callback(percent, spd_str)
+                        except TypeError:
+                            progress_callback(percent)
         except HttpError as e:
             if e.resp.status in [500, 502, 503, 504]:
                 logger.warning(f"Recoverable HTTP error {e.resp.status}, retrying in 5s...")
