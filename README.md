@@ -76,7 +76,7 @@ Heroku ko `ffmpeg` aur `aria2` chalane ke liye 2 buildpacks chahiye:
    - **KEY:** `CLOUDFLARE_AUTH_API`
    - **VALUE:** `https://yt-uplode.mypresonal65.workers.dev`
    - Click **Add**.
-3. *(Optional)* Agar aapke paas ClassPlus token fix hai to:
+3. *(Optional)* Agar aapke paas ClassPlus token fix hai to(ye dalne ki jarurat ni h):
    - **KEY:** `CP_TOKEN`
    - **VALUE:** `Aapka_Classplus_Token`
    - Click **Add**.
