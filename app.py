@@ -77,54 +77,58 @@ if not CLOUDFLARE_AUTH_API:
 # License In-memory Cache & Helper
 license_cache: Dict[str, Dict[str, Any]] = {}
 
-async def verify_license_permission(license_key: Optional[str], device_id: Optional[str], permission_name: str) -> tuple:
+def verify_license_permission(license_key: Optional[str], device_id: Optional[str], permission_name: str) -> bool:
+    """
+    Validates license key and checks if requested feature is permitted.
+    Features: 'single', 'batch', 'cp_support', 'yt_upload', 'tg_upload', 'disk_clean'
+    """
     if not CLOUDFLARE_AUTH_API:
-        return True, "No auth API configured"
-    
+        return True
+
     if not license_key:
-        return False, "Access License Key is required. Please activate your key."
-    
-    clean_key = license_key.strip().upper()
+        return False
+
+    clean_key = str(license_key).strip().upper()
     now = time.time()
     cached = license_cache.get(clean_key)
     data = None
-    
-    if cached and (now - cached["cached_at"] < 120):
+
+    if cached and (now - cached["cached_at"] < 600):
         data = cached["data"]
     else:
         try:
             resp = requests.post(
                 f"{CLOUDFLARE_AUTH_API}/api/license/verify",
                 json={"key": clean_key, "device_id": device_id},
-                timeout=6
+                timeout=5
             )
             if resp.status_code == 200:
                 data = resp.json()
-                if data.get("valid") or data.get("success"):
+                if data.get("valid") or data.get("success") or data.get("licensed"):
                     license_cache[clean_key] = {"data": data, "cached_at": now}
+                else:
+                    return False
             elif resp.status_code in (400, 403, 404):
-                err = resp.json().get("error", "Invalid license key")
-                return False, err
+                return False
         except Exception as e:
             if cached:
                 data = cached["data"]
             else:
-                logger.warning(f"Failed to verify license with Cloudflare: {e}")
-                return True, "Grace access"
-    
+                logger.warning(f"Cloudflare license verification timeout or error: {e}. Granting grace access.")
+                return True
+
     if not data or not (data.get("valid") or data.get("success") or data.get("licensed")):
-        return False, data.get("error", "Invalid or expired license key")
-    
-    # Check device binding
+        return False
+
+    # Check device binding if device_id was bound on license
     if device_id and data.get("device_id") and data.get("device_id") != device_id:
-        return False, "License key is locked to another device!"
-    
+        return False
+
     # Check granular feature permission
-    perms = data.get("permissions", {})
-    if not perms.get(permission_name, False):
-        return False, f"Permission '{permission_name}' is locked on your license key. Contact admin to upgrade."
-    
-    return True, "OK"
+    perms = data.get("permissions") or {}
+    if not perms:
+        return True
+    return bool(perms.get(permission_name, True))
 
 # In-memory Task Store and Queue
 tasks_lock = asyncio.Lock()
@@ -1402,59 +1406,6 @@ async def queue_worker_loop():
             await asyncio.sleep(1)
 
 
-# Cloudflare D1 Auth API URL (configurable via env or cloudflare_api.txt)
-CLOUDFLARE_AUTH_API = os.environ.get("CLOUDFLARE_AUTH_API", "").rstrip("/")
-if not CLOUDFLARE_AUTH_API and (BASE_DIR / "cloudflare_api.txt").exists():
-    try:
-        CLOUDFLARE_AUTH_API = (BASE_DIR / "cloudflare_api.txt").read_text().strip().rstrip("/")
-    except Exception:
-        pass
-
-# License verification cache & helper
-license_cache: Dict[str, Dict[str, Any]] = {}
-
-def verify_license_permission(license_key: Optional[str], device_id: Optional[str], feature: str) -> bool:
-    """
-    Validates license key and checks if requested feature is permitted.
-    Features: 'single', 'batch', 'cp_support', 'yt_upload', 'tg_upload', 'disk_clean'
-    """
-    if not CLOUDFLARE_AUTH_API:
-        return True
-
-    if not license_key:
-        return False
-
-    clean_key = license_key.strip().upper()
-    now = time.time()
-    cached = license_cache.get(clean_key)
-    if cached and (now - cached["cached_at"] < 120):
-        lic_data = cached["data"]
-    else:
-        try:
-            resp = requests.post(
-                f"{CLOUDFLARE_AUTH_API}/api/license/verify",
-                json={"key": clean_key, "device_id": device_id},
-                timeout=5
-            )
-            if resp.status_code == 200:
-                lic_data = resp.json()
-                if lic_data.get("valid"):
-                    license_cache[clean_key] = {"data": lic_data, "cached_at": now}
-                else:
-                    return False
-            else:
-                return False
-        except Exception as e:
-            logger.warning(f"Error validating license against Cloudflare: {e}")
-            if cached:
-                lic_data = cached["data"]
-            else:
-                return False
-
-    perms = lic_data.get("permissions") or {}
-    return bool(perms.get(feature, False))
-
-
 # --- Helper Functions ---
 def create_task_entry(
     url: str, 
@@ -1494,7 +1445,7 @@ def create_task_entry(
         "url": url.strip(),
         "custom_name": custom_name.strip() if custom_name else "",
         "display_title": custom_name.strip() if custom_name else url.strip(),
-        "resolution": resolution,
+        "resolution": str(resolution or "720"),
         "media_type": initial_media_type,
         "resolved_url": None,
         "keys": keys or [],
@@ -2204,7 +2155,7 @@ async def download_batch(req: BatchDownloadRequest):
 @app.get("/api/queue")
 async def get_queue(user_id: Optional[str] = Query(None)):
     if user_id:
-        user_tasks = [t for t in tasks_db.values() if t.get("user_id") == user_id]
+        user_tasks = [t for t in tasks_db.values() if not t.get("user_id") or t.get("user_id") == user_id]
     else:
         user_tasks = list(tasks_db.values())
     # Return tasks sorted by creation time (most recent first)

@@ -1261,7 +1261,37 @@ async function handleSingleSubmit(e) {
   }
 
   const submitBtn = document.getElementById('btnSingleSubmit');
-  submitBtn.disabled = true;
+  if (submitBtn) submitBtn.disabled = true;
+
+  // 🚀 OPTIMISTIC LIVE CARD: Show in queue instantly (0ms) so user never wonders if it started
+  const tempId = 'temp_' + Date.now();
+  const optimisticTask = {
+    id: tempId,
+    url: url,
+    custom_name: customName,
+    display_title: customName || url,
+    resolution: resolution,
+    media_type: detectStreamMediaType(url),
+    upload_to_youtube: ytUpload,
+    privacy_status: ytPrivacy,
+    upload_to_telegram: tgUpload,
+    tg_chat_id: tgChatId || tgConfig.default_chat || null,
+    status: 'queued',
+    progress: 0,
+    speed_str: 'Starting download engine...',
+    eta_str: 'Initializing...',
+    filesize_str: 'Connecting...',
+    created_at: Date.now() / 1000
+  };
+
+  allTasks.unshift(optimisticTask);
+  renderQueue();
+
+  // Smoothly scroll down towards queue so user sees the live card
+  const qSec = document.getElementById('queueList');
+  if (qSec) {
+    qSec.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
 
   try {
     const res = await fetch('/api/download/single', {
@@ -1288,9 +1318,15 @@ async function handleSingleSubmit(e) {
       })
     });
 
-    const data = await res.json();
-    if (res.ok && data.success) {
-      showToast(ytUpload ? 'Video queued + YouTube upload enabled!' : 'Video added to download queue!', 'success');
+    let data = {};
+    try {
+      data = await res.json();
+    } catch (e) {
+      data = {};
+    }
+
+    if (res.ok && data.success && data.task) {
+      showToast(ytUpload ? '✓ Video queued + YouTube upload enabled!' : '✓ Video added to download queue!', 'success');
       urlInput.value = '';
       nameInput.value = '';
       const refInp = document.getElementById('singleReferer');
@@ -1300,15 +1336,28 @@ async function handleSingleSubmit(e) {
       if (origInp) origInp.value = '';
       if (tokInp) tokInp.value = '';
       detectStreamType('');
-      await fetchQueue();
-      await fetchStats();
+
+      // Replace optimistic card with real server task
+      const optIdx = allTasks.findIndex(t => t.id === tempId);
+      if (optIdx !== -1) {
+        allTasks[optIdx] = data.task;
+      } else {
+        allTasks.unshift(data.task);
+      }
+      renderQueue();
+      triggerImmediatePoll();
     } else {
-      showToast(data.detail || 'Failed to add video.', 'error');
+      // Revert optimistic task
+      allTasks = allTasks.filter(t => t.id !== tempId);
+      renderQueue();
+      showToast(data.detail || data.error || 'Failed to add video to queue.', 'error');
     }
   } catch (err) {
-    showToast('Network error while adding video.', 'error');
+    allTasks = allTasks.filter(t => t.id !== tempId);
+    renderQueue();
+    showToast('Network error while adding video. Please try again.', 'error');
   } finally {
-    submitBtn.disabled = false;
+    if (submitBtn) submitBtn.disabled = false;
   }
 }
 
@@ -1358,7 +1407,26 @@ async function handleBatchSubmit(e) {
   }
 
   const submitBtn = document.getElementById('btnBatchSubmit');
-  submitBtn.disabled = true;
+  if (submitBtn) submitBtn.disabled = true;
+
+  // Optimistic feedback
+  const tempBatchId = 'batch_' + Date.now();
+  const optimisticBatchTask = {
+    id: tempBatchId,
+    url: 'Batch Download',
+    custom_name: 'Adding batch videos...',
+    display_title: 'Adding batch videos...',
+    resolution: defaultRes,
+    media_type: 'Batch Process',
+    status: 'queued',
+    progress: 0,
+    speed_str: 'Processing links...',
+    eta_str: 'Queuing...',
+    filesize_str: '--',
+    created_at: Date.now() / 1000
+  };
+  allTasks.unshift(optimisticBatchTask);
+  renderQueue();
 
   try {
     const res = await fetch('/api/download/batch', {
@@ -1384,9 +1452,17 @@ async function handleBatchSubmit(e) {
       })
     });
 
-    const data = await res.json();
+    let data = {};
+    try {
+      data = await res.json();
+    } catch (e) {
+      data = {};
+    }
+
+    allTasks = allTasks.filter(t => t.id !== tempBatchId);
+
     if (res.ok && data.success) {
-      showToast(`Enqueued ${data.count} videos successfully!`, 'success');
+      showToast(`✓ Enqueued ${data.count} videos successfully!`, 'success');
       textArea.value = '';
       const refInp = document.getElementById('batchReferer');
       const origInp = document.getElementById('batchOrigin');
@@ -1395,34 +1471,84 @@ async function handleBatchSubmit(e) {
       if (origInp) origInp.value = '';
       if (tokInp) tokInp.value = '';
       updateBatchCount();
-      await fetchQueue();
-      await fetchStats();
+      if (data.tasks && Array.isArray(data.tasks)) {
+        // Prepend new batch tasks
+        const existingIds = new Set(allTasks.map(t => t.id));
+        data.tasks.forEach(bt => {
+          if (!existingIds.has(bt.id)) allTasks.unshift(bt);
+        });
+      }
+      renderQueue();
+      triggerImmediatePoll();
     } else {
-      showToast(data.detail || 'Failed to process batch.', 'error');
+      renderQueue();
+      showToast(data.detail || data.error || 'Failed to process batch.', 'error');
     }
   } catch (err) {
+    allTasks = allTasks.filter(t => t.id !== tempBatchId);
+    renderQueue();
     showToast('Network error while enqueueing batch.', 'error');
   } finally {
-    submitBtn.disabled = false;
+    if (submitBtn) submitBtn.disabled = false;
   }
 }
 
-
-// --- Polling & Data Fetching (Refreshes every 2 seconds) ---
-function startPolling() {
-  if (pollInterval) clearInterval(pollInterval);
-  pollInterval = setInterval(async () => {
-    await fetchQueue();
-    await fetchStats();
-  }, 2000);
+// Media type helper for optimistic UI
+function detectStreamMediaType(url) {
+  const u = (url || '').toLowerCase();
+  if (u.includes('drive.google.com') || u.includes('docs.google.com')) return 'Google Drive';
+  if (u.includes('mega.nz') || u.includes('mega.co.nz')) return 'Mega.nz';
+  if (u.includes('classplus') || u.includes('testbook.com') || u.includes('akamai') || u.includes('media-cdn')) return 'ClassPlus / Akamai';
+  if (u.includes('classx.co.in') || u.includes('transcoded-videos.classx')) return 'ClassX Stream';
+  if (u.includes('cloud-front.in') || u.includes('liveclasses') || u.includes('timeshift=1')) return 'Live Classes / Timeshift';
+  if (u.includes('.m3u8')) return 'HLS Stream';
+  if (u.includes('.mpd')) return 'DASH Stream';
+  return 'Standard';
 }
 
-// Automatically resume & refresh whenever user switches back to this tab
+// --- Adaptive Real-Time Polling Engine ---
+// Automatically syncs every 750ms during active downloads for a pure 60fps-like LIVE page experience
+let pollTimeoutId = null;
+let isPollingActive = false;
+
+function scheduleNextPoll(delayMs) {
+  if (pollTimeoutId) clearTimeout(pollTimeoutId);
+  pollTimeoutId = setTimeout(runPollCycle, delayMs);
+}
+
+async function runPollCycle() {
+  if (isPollingActive) {
+    scheduleNextPoll(1000);
+    return;
+  }
+  isPollingActive = true;
+  try {
+    await fetchQueue();
+    await fetchStats();
+  } catch (err) {
+    console.warn('Poll cycle warning:', err);
+  } finally {
+    isPollingActive = false;
+    // Check if any download, processing, or upload task is active
+    const hasActiveTasks = allTasks.some(t => ['queued', 'downloading', 'processing', 'uploading'].includes(t.status));
+    // High-speed 750ms polling when tasks are running, 2600ms when idle
+    const nextInterval = hasActiveTasks ? 750 : 2600;
+    scheduleNextPoll(nextInterval);
+  }
+}
+
+function startPolling() {
+  scheduleNextPoll(400);
+}
+
+function triggerImmediatePoll() {
+  scheduleNextPoll(60);
+}
+
+// Automatically resume & fast-refresh whenever user switches back to this tab
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) {
-    fetchQueue();
-    fetchStats();
-    startPolling();
+    triggerImmediatePoll();
   }
 });
 
@@ -1433,7 +1559,7 @@ async function manualRefreshQueue() {
   try {
     await fetchQueue();
     await fetchStats();
-    showToast('Download queue refreshed!', 'info');
+    showToast('Download queue updated in real-time!', 'info');
   } catch (err) {
     showToast('Failed to refresh queue', 'error');
   } finally {
@@ -1449,7 +1575,14 @@ async function fetchQueue() {
     const res = await fetch(`/api/queue?user_id=${encodeURIComponent(uid)}`);
     if (!res.ok) return;
     const data = await res.json();
-    allTasks = data.tasks || [];
+    const serverTasks = data.tasks || [];
+
+    // Retain any pending optimistic tasks (temp_...) until resolved
+    const pendingOptimistic = allTasks.filter(t => String(t.id).startsWith('temp_') || String(t.id).startsWith('batch_'));
+    const serverIds = new Set(serverTasks.map(t => String(t.id)));
+    const filteredPending = pendingOptimistic.filter(ot => !serverIds.has(String(ot.id)));
+
+    allTasks = [...filteredPending, ...serverTasks];
     renderQueue();
   } catch (err) {
     console.error('Failed to fetch queue:', err);
@@ -1462,11 +1595,17 @@ async function fetchStats() {
     const res = await fetch(`/api/stats?user_id=${encodeURIComponent(uid)}`);
     if (!res.ok) return;
     const stats = await res.json();
-    document.getElementById('statActive').textContent = stats.active_tasks;
-    document.getElementById('statQueue').textContent = stats.queue_length;
-    document.getElementById('statCompleted').textContent = stats.completed_tasks;
-    document.getElementById('statDisk').textContent = stats.disk_usage;
-    document.getElementById('queueTotalBadge').textContent = stats.total_tasks;
+    const elActive = document.getElementById('statActive');
+    const elQueue = document.getElementById('statQueue');
+    const elCompleted = document.getElementById('statCompleted');
+    const elDisk = document.getElementById('statDisk');
+    const elBadge = document.getElementById('queueTotalBadge');
+
+    if (elActive) elActive.textContent = stats.active_tasks ?? 0;
+    if (elQueue) elQueue.textContent = stats.queue_length ?? 0;
+    if (elCompleted) elCompleted.textContent = stats.completed_tasks ?? 0;
+    if (elDisk) elDisk.textContent = stats.disk_usage ?? '0 MB';
+    if (elBadge) elBadge.textContent = stats.total_tasks ?? 0;
   } catch (err) {
     console.error('Failed to fetch stats:', err);
   }
@@ -1484,12 +1623,18 @@ function setFilter(filter) {
 // --- Delete Single Task ---
 async function deleteTask(taskId) {
   try {
+    const card = document.getElementById(`card-${taskId}`);
+    if (card) {
+      card.style.opacity = '0.35';
+      card.style.pointerEvents = 'none';
+    }
     const uid = getUserId();
     const res = await fetch(`/api/queue/${taskId}?user_id=${encodeURIComponent(uid)}`, { method: 'DELETE' });
     if (res.ok) {
       showToast('Task removed from queue', 'info');
-      await fetchQueue();
-      await fetchStats();
+      allTasks = allTasks.filter(t => String(t.id) !== String(taskId));
+      renderQueue();
+      triggerImmediatePoll();
     }
   } catch (err) {
     showToast('Failed to delete task', 'error');
@@ -1503,24 +1648,286 @@ async function clearFinishedQueue() {
     const res = await fetch(`/api/queue/clear?user_id=${encodeURIComponent(uid)}`, { method: 'POST' });
     if (res.ok) {
       const data = await res.json();
-      showToast(`Cleared ${data.cleared_count} finished tasks`, 'info');
-      await fetchQueue();
-      await fetchStats();
+      showToast(`Cleared ${data.cleared_count || 0} finished tasks`, 'info');
+      allTasks = allTasks.filter(t => !['completed', 'failed'].includes(t.status));
+      renderQueue();
+      triggerImmediatePoll();
     }
   } catch (err) {
     showToast('Failed to clear queue', 'error');
   }
 }
 
-// --- Render Queue Cards ---
+// Helper: Status badge markup
+function getStatusBadgeData(task) {
+  const status = task.status || 'queued';
+  const isDownloading = status === 'downloading';
+  const isUploading = status === 'uploading';
+  const isCompleted = status === 'completed';
+  const isFailed = status === 'failed';
+  const isProcessing = status === 'processing';
+
+  let badgeClass = 'badge-queued';
+  let badgeHtml = 'Queued';
+
+  if (isDownloading) {
+    badgeClass = 'badge-downloading';
+    badgeHtml = '<span class="pill-dot blue pulse"></span> Downloading';
+  } else if (isUploading) {
+    badgeClass = 'badge-downloading';
+    if (task.telegram_status === 'uploading') {
+      badgeHtml = '<span class="pill-dot blue pulse"></span> Uploading to Telegram...';
+    } else {
+      badgeHtml = '<span class="pill-dot amber pulse"></span> Uploading to YouTube...';
+    }
+  } else if (isProcessing) {
+    badgeClass = 'badge-processing';
+    badgeHtml = '<span class="pill-dot purple pulse"></span> Merging / Encoding';
+  } else if (isCompleted) {
+    badgeClass = 'badge-completed';
+    badgeHtml = '✓ Completed';
+  } else if (isFailed) {
+    badgeClass = 'badge-failed';
+    badgeHtml = '✕ Failed';
+  }
+
+  return { badgeClass, badgeHtml };
+}
+
+// Helper: Build card action buttons
+function buildTaskActionsHtml(task) {
+  const isCompleted = task.status === 'completed';
+  const taskId = escapeHtml(String(task.id));
+  let html = '';
+
+  if (task.youtube_url) {
+    html += `
+      <a href="${escapeHtml(task.youtube_url)}" target="_blank" rel="noopener noreferrer" class="btn-yt-watch" title="Watch on YouTube">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/>
+        </svg>
+        Watch on YouTube
+      </a>
+    `;
+  } else if (isCompleted) {
+    html += `
+      <button class="btn-yt-watch" onclick="uploadTaskToYouTube('${taskId}')" title="Upload to YouTube">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/>
+        </svg>
+        Upload to YT
+      </button>
+    `;
+  }
+
+  if (task.telegram_url) {
+    html += `
+      <a href="${escapeHtml(task.telegram_url)}" target="_blank" rel="noopener noreferrer" class="btn-tg-watch" title="Watch on Telegram">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69a.2.2 0 0 0-.05-.18c-.06-.05-.14-.03-.21-.02-.09.02-1.49.95-4.22 2.79-.4.27-.76.41-1.08.4-.36-.01-1.04-.2-1.55-.37-.63-.2-1.12-.31-1.08-.66.02-.18.27-.36.75-.55 2.92-1.27 4.86-2.11 5.83-2.51 2.78-1.16 3.35-1.36 3.73-1.36.08 0 .27.02.39.12.1.08.13.19.14.27-.01.06.01.24 0 .38z"/>
+        </svg>
+        Watch on TG
+      </a>
+    `;
+  } else if (isCompleted) {
+    html += `
+      <button class="btn-tg-watch" onclick="uploadTaskToTelegram('${taskId}')" title="Upload to Telegram">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69a.2.2 0 0 0-.05-.18c-.06-.05-.14-.03-.21-.02-.09.02-1.49.95-4.22 2.79-.4.27-.76.41-1.08.4-.36-.01-1.04-.2-1.55-.37-.63-.2-1.12-.31-1.08-.66.02-.18.27-.36.75-.55 2.92-1.27 4.86-2.11 5.83-2.51 2.78-1.16 3.35-1.36 3.73-1.36.08 0 .27.02.39.12.1.08.13.19.14.27-.01.06.01.24 0 .38z"/>
+        </svg>
+        Upload to TG
+      </button>
+    `;
+  }
+
+  if (isCompleted && task.download_url) {
+    html += `
+      <a href="${task.download_url}" class="btn-download-file" download="${escapeHtml(task.friendly_filename || 'video.mp4')}">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+          <polyline points="7 10 12 15 17 10"></polyline>
+          <line x1="12" y1="15" x2="12" y2="3"></line>
+        </svg>
+        Download File
+      </a>
+    `;
+  }
+
+  html += `
+    <button class="btn-task-del" onclick="deleteTask('${taskId}')" title="Delete from list">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <line x1="18" y1="6" x2="6" y2="18"></line>
+        <line x1="6" y1="6" x2="18" y2="18"></line>
+      </svg>
+    </button>
+  `;
+
+  return html;
+}
+
+// Helper: Build card inner HTML
+function buildTaskCardInnerHtml(task) {
+  const status = task.status || 'queued';
+  const isDownloading = status === 'downloading';
+  const isUploading = status === 'uploading';
+  const isCompleted = status === 'completed';
+  const isFailed = status === 'failed';
+
+  const { badgeClass, badgeHtml } = getStatusBadgeData(task);
+
+  const progressPercent = Math.max(0, Math.min(100, Math.round((task.progress || 0) * 10) / 10));
+  const speed = task.speed_str || '--';
+  const eta = task.eta_str || '--';
+  const filesize = task.filesize_str || '--';
+  const resText = String(task.resolution || '720').toUpperCase();
+  const displayTitle = task.display_title || task.custom_name || task.url || 'Video';
+
+  let etaHtml = '';
+  if (isDownloading) {
+    etaHtml = `<span>ETA: ${escapeHtml(eta)}</span>`;
+  } else if (isFailed) {
+    etaHtml = `<span style="color: var(--accent-rose);">${escapeHtml(task.error_message || 'Download Error')}</span>`;
+  } else if (task.youtube_status && !task.youtube_url) {
+    etaHtml = `<span style="color: #fbbf24;">${escapeHtml(task.youtube_status)}</span>`;
+  } else if (task.telegram_status && !task.telegram_url) {
+    etaHtml = `<span style="color: #38bdf8;">${escapeHtml(task.telegram_status)}</span>`;
+  }
+
+  const speedSpan = (isDownloading || isUploading) ? `<span>• ${escapeHtml(speed)}</span>` : '';
+
+  return `
+    <div class="task-top">
+      <div class="task-info">
+        <h4 class="task-title" title="${escapeHtml(displayTitle)}">
+          ${escapeHtml(displayTitle)}
+        </h4>
+        <div class="task-meta">
+          <span class="badge-res">${escapeHtml(resText)}</span>
+          ${task.media_type && task.media_type !== 'Standard' ? `<span class="badge-drm">⚡ ${escapeHtml(task.media_type)}</span>` : ''}
+          ${task.upload_to_youtube ? `<span class="badge-drm" style="color:#ff6666; border-color:rgba(255,0,0,0.35); background:rgba(255,0,0,0.12);">🔴 YT (${escapeHtml(task.privacy_status || 'unlisted')})</span>` : ''}
+          ${task.upload_to_telegram ? `<span class="badge-drm" style="color:#38bdf8; border-color:rgba(0,136,204,0.35); background:rgba(0,136,204,0.12);">✈ TG (${escapeHtml(task.tg_chat_id || 'Chat')})</span>` : ''}
+          <span class="task-meta-size">Size: ${escapeHtml(filesize)}</span>
+        </div>
+      </div>
+      <div class="status-badge ${badgeClass}">
+        ${badgeHtml}
+      </div>
+    </div>
+
+    <div class="task-progress-section">
+      <div class="progress-track">
+        <div class="progress-fill ${isCompleted ? 'done' : ''}" style="width: ${progressPercent}%;"></div>
+      </div>
+      <div class="task-stats">
+        <div class="stat-item stat-percent-wrap">
+          <span>${progressPercent}%</span>${speedSpan}
+        </div>
+        <div class="stat-item stat-eta-wrap">
+          ${etaHtml}
+        </div>
+      </div>
+    </div>
+
+    <div class="task-bottom">
+      <span class="task-url" title="${escapeHtml(task.url || '')}">${escapeHtml(task.url || '')}</span>
+      <div class="task-actions">
+        ${buildTaskActionsHtml(task)}
+      </div>
+    </div>
+  `;
+}
+
+// Create new card DOM element
+function createCardElement(task) {
+  const card = document.createElement('div');
+  const taskId = String(task.id);
+  card.id = `card-${taskId}`;
+  card.dataset.taskId = taskId;
+  card.className = `task-card status-${escapeHtml(task.status || 'queued')}`;
+  card.innerHTML = buildTaskCardInnerHtml(task);
+  return card;
+}
+
+// In-place card updater (ZERO FLICKER, ZERO PAGE REBUILDS)
+function updateCardElement(card, task) {
+  const status = task.status || 'queued';
+  const isDownloading = status === 'downloading';
+  const isUploading = status === 'uploading';
+  const isCompleted = status === 'completed';
+  const isFailed = status === 'failed';
+
+  // Update card class
+  const expectedClass = `task-card status-${status}`;
+  if (card.className !== expectedClass) {
+    card.className = expectedClass;
+  }
+
+  // Update status badge
+  const { badgeClass, badgeHtml } = getStatusBadgeData(task);
+  const badgeEl = card.querySelector('.status-badge');
+  if (badgeEl) {
+    badgeEl.className = `status-badge ${badgeClass}`;
+    if (badgeEl.innerHTML !== badgeHtml) {
+      badgeEl.innerHTML = badgeHtml;
+    }
+  }
+
+  // Smooth live progress bar update
+  const progressPercent = Math.max(0, Math.min(100, Math.round((task.progress || 0) * 10) / 10));
+  const fill = card.querySelector('.progress-fill');
+  if (fill) {
+    fill.style.width = `${progressPercent}%`;
+    fill.classList.toggle('done', isCompleted);
+  }
+
+  // Stats: % and Speed
+  const speed = task.speed_str || '--';
+  const speedSpan = (isDownloading || isUploading) ? `<span>• ${escapeHtml(speed)}</span>` : '';
+  const statPercent = card.querySelector('.stat-percent-wrap');
+  if (statPercent) {
+    statPercent.innerHTML = `<span>${progressPercent}%</span>${speedSpan}`;
+  }
+
+  // Stats: ETA / Error / YouTube / Telegram
+  const eta = task.eta_str || '--';
+  const statEta = card.querySelector('.stat-eta-wrap');
+  if (statEta) {
+    let etaHtml = '';
+    if (isDownloading) {
+      etaHtml = `<span>ETA: ${escapeHtml(eta)}</span>`;
+    } else if (isFailed) {
+      etaHtml = `<span style="color: var(--accent-rose);">${escapeHtml(task.error_message || 'Download Error')}</span>`;
+    } else if (task.youtube_status && !task.youtube_url) {
+      etaHtml = `<span style="color: #fbbf24;">${escapeHtml(task.youtube_status)}</span>`;
+    } else if (task.telegram_status && !task.telegram_url) {
+      etaHtml = `<span style="color: #38bdf8;">${escapeHtml(task.telegram_status)}</span>`;
+    }
+    statEta.innerHTML = etaHtml;
+  }
+
+  // Filesize
+  const sizeEl = card.querySelector('.task-meta-size');
+  if (sizeEl) {
+    sizeEl.textContent = `Size: ${task.filesize_str || '--'}`;
+  }
+
+  // Action buttons
+  const actionsContainer = card.querySelector('.task-actions');
+  if (actionsContainer && (isCompleted || isFailed || task.youtube_url || task.telegram_url)) {
+    actionsContainer.innerHTML = buildTaskActionsHtml(task);
+  }
+}
+
+// --- True Real-Time Incremental Queue Renderer ---
 function renderQueue() {
   const container = document.getElementById('queueList');
   const emptyState = document.getElementById('emptyState');
+  if (!container) return;
 
   // Filter tasks
   let filtered = allTasks;
   if (currentFilter === 'active') {
-    filtered = allTasks.filter(t => ['queued', 'downloading', 'processing'].includes(t.status));
+    filtered = allTasks.filter(t => ['queued', 'downloading', 'processing', 'uploading'].includes(t.status));
   } else if (currentFilter === 'completed') {
     filtered = allTasks.filter(t => t.status === 'completed');
   } else if (currentFilter === 'failed') {
@@ -1528,215 +1935,49 @@ function renderQueue() {
   }
 
   if (filtered.length === 0) {
-    container.innerHTML = '';
-    container.appendChild(emptyState);
-    emptyState.style.display = 'flex';
+    container.querySelectorAll('.task-card').forEach(c => c.remove());
+    if (emptyState) {
+      if (!container.contains(emptyState)) {
+        container.appendChild(emptyState);
+      }
+      emptyState.style.display = 'flex';
+    }
     return;
   }
 
-  emptyState.style.display = 'none';
-
-  // In-place DOM update to eliminate re-rendering flicker and jump
-  const existingCardIds = Array.from(container.querySelectorAll('.task-card')).map(c => c.id.replace('card-', ''));
-  const filteredIds = filtered.map(t => t.id);
-  const canUpdateInPlace = existingCardIds.length === filteredIds.length && 
-                           existingCardIds.every((id, idx) => id === filteredIds[idx]);
-
-  if (canUpdateInPlace) {
-    let requiresFullRebuild = false;
-    filtered.forEach(task => {
-      const card = document.getElementById(`card-${task.id}`);
-      if (!card) { requiresFullRebuild = true; return; }
-
-      const progressPercent = task.progress || 0;
-      const speed = task.speed_str || '--';
-      const eta = task.eta_str || '--';
-      const filesize = task.filesize_str || '--';
-      const isDownloading = task.status === 'downloading';
-      const isUploading = task.status === 'uploading';
-      const isCompleted = task.status === 'completed';
-
-      // Check if status changed
-      if (!card.classList.contains(`status-${task.status}`)) {
-        requiresFullRebuild = true;
-        return;
-      }
-
-      // Smooth progress bar slide
-      const fill = card.querySelector('.progress-fill');
-      if (fill) {
-        fill.style.width = `${progressPercent}%`;
-        fill.classList.toggle('done', isCompleted);
-      }
-
-      // Stats: % and speed
-      const statPercent = card.querySelector('.task-stats .stat-item:first-child');
-      if (statPercent) {
-        statPercent.innerHTML = `<span>${progressPercent}%</span>${(isDownloading || isUploading) ? `<span>• ${speed}</span>` : ''}`;
-      }
-
-      // Stats: ETA or error or YouTube status
-      const statEta = card.querySelector('.task-stats .stat-item:last-child');
-      if (statEta) {
-        if (isDownloading) {
-          statEta.innerHTML = `<span>ETA: ${eta}</span>`;
-        } else if (task.status === 'failed') {
-          statEta.innerHTML = `<span style="color: var(--accent-rose);">${escapeHtml(task.error_message || 'Download Error')}</span>`;
-        } else if (task.youtube_status && !task.youtube_url) {
-          statEta.innerHTML = `<span style="color: #fbbf24;">${escapeHtml(task.youtube_status)}</span>`;
-        } else if (task.telegram_status && !task.telegram_url) {
-          statEta.innerHTML = `<span style="color: #38bdf8;">${escapeHtml(task.telegram_status)}</span>`;
-        } else {
-          statEta.innerHTML = '';
-        }
-      }
-
-      // Filesize
-      const sizeEl = card.querySelector('.task-meta span:last-child');
-      if (sizeEl) {
-        sizeEl.textContent = `Size: ${filesize}`;
-      }
-    });
-
-    if (!requiresFullRebuild) {
-      return;
-    }
+  if (emptyState && container.contains(emptyState)) {
+    emptyState.style.display = 'none';
   }
 
-  // Build Cards
-  const cardsHtml = filtered.map(task => {
-    const isDownloading = task.status === 'downloading';
-    const isUploading = task.status === 'uploading';
-    const isCompleted = task.status === 'completed';
-    const isFailed = task.status === 'failed';
-    const isProcessing = task.status === 'processing';
-    const isQueued = task.status === 'queued';
+  const activeTaskIds = new Set(filtered.map(t => String(t.id)));
 
-    let statusBadgeClass = 'badge-queued';
-    let statusText = 'Queued';
-
-    if (isDownloading) {
-      statusBadgeClass = 'badge-downloading';
-      statusText = '<span class="pill-dot blue pulse"></span> Downloading';
-    } else if (isUploading) {
-      statusBadgeClass = 'badge-downloading';
-      if (task.telegram_status === 'uploading') {
-        statusText = '<span class="pill-dot blue pulse"></span> Uploading to Telegram...';
-      } else {
-        statusText = '<span class="pill-dot amber pulse"></span> Uploading to YouTube...';
-      }
-    } else if (isProcessing) {
-      statusBadgeClass = 'badge-processing';
-      statusText = 'Merging / Encoding';
-    } else if (isCompleted) {
-      statusBadgeClass = 'badge-completed';
-      statusText = '✓ Completed';
-    } else if (isFailed) {
-      statusBadgeClass = 'badge-failed';
-      statusText = '✕ Failed';
+  // Remove cards that are no longer in this filtered list
+  container.querySelectorAll('.task-card').forEach(card => {
+    const cardId = card.dataset.taskId;
+    if (cardId && !activeTaskIds.has(cardId)) {
+      card.remove();
     }
+  });
 
-    const progressPercent = task.progress || 0;
-    const speed = task.speed_str || '--';
-    const eta = task.eta_str || '--';
-    const filesize = task.filesize_str || '--';
+  // Incrementally insert or update cards in-place
+  filtered.forEach((task, index) => {
+    const taskId = String(task.id);
+    let card = document.getElementById(`card-${taskId}`);
 
-    return `
-      <div class="task-card status-${escapeHtml(task.status)}" id="card-${task.id}">
-        <div class="task-top">
-          <div class="task-info">
-            <h4 class="task-title" title="${escapeHtml(task.display_title)}">
-              ${escapeHtml(task.display_title)}
-            </h4>
-            <div class="task-meta">
-              <span class="badge-res">${escapeHtml(task.resolution.toUpperCase())}</span>
-              ${task.media_type && task.media_type !== 'Standard' ? `<span class="badge-drm">⚡ ${escapeHtml(task.media_type)}</span>` : ''}
-              ${task.upload_to_youtube ? `<span class="badge-drm" style="color:#ff6666; border-color:rgba(255,0,0,0.35); background:rgba(255,0,0,0.12);">🔴 YT (${escapeHtml(task.privacy_status || 'unlisted')})</span>` : ''}
-              ${task.upload_to_telegram ? `<span class="badge-drm" style="color:#38bdf8; border-color:rgba(0,136,204,0.35); background:rgba(0,136,204,0.12);">✈ TG (${escapeHtml(task.tg_chat_id || 'Chat')})</span>` : ''}
-              <span>Size: ${escapeHtml(filesize)}</span>
-            </div>
-
-          </div>
-          <div class="status-badge ${statusBadgeClass}">
-            ${statusText}
-          </div>
-        </div>
-
-        <div class="task-progress-section">
-          <div class="progress-track">
-            <div class="progress-fill ${isCompleted ? 'done' : ''}" style="width: ${progressPercent}%;"></div>
-          </div>
-          <div class="task-stats">
-            <div class="stat-item">
-              <span>${progressPercent}%</span>
-              ${isDownloading || isUploading ? `<span>• ${speed}</span>` : ''}
-            </div>
-            <div class="stat-item">
-              ${isDownloading ? `<span>ETA: ${eta}</span>` : ''}
-              ${isFailed ? `<span style="color: var(--accent-rose);">${escapeHtml(task.error_message || 'Download Error')}</span>` : ''}
-              ${task.youtube_status && !task.youtube_url ? `<span style="color: #fbbf24;">${escapeHtml(task.youtube_status)}</span>` : ''}
-              ${task.telegram_status && !task.telegram_url ? `<span style="color: #38bdf8;">${escapeHtml(task.telegram_status)}</span>` : ''}
-            </div>
-          </div>
-        </div>
-
-        <div class="task-bottom">
-          <span class="task-url" title="${escapeHtml(task.url)}">${escapeHtml(task.url)}</span>
-          <div class="task-actions">
-            ${task.youtube_url ? `
-              <a href="${escapeHtml(task.youtube_url)}" target="_blank" rel="noopener noreferrer" class="btn-yt-watch" title="Watch on YouTube">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-                  <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/>
-                </svg>
-                Watch on YouTube
-              </a>
-            ` : (isCompleted ? `
-              <button class="btn-yt-watch" onclick="uploadTaskToYouTube('${task.id}')" title="Upload to YouTube">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-                  <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/>
-                </svg>
-                Upload to YT
-              </button>
-            ` : '')}
-            ${task.telegram_url ? `
-              <a href="${escapeHtml(task.telegram_url)}" target="_blank" rel="noopener noreferrer" class="btn-tg-watch" title="Watch on Telegram">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-                  <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69a.2.2 0 0 0-.05-.18c-.06-.05-.14-.03-.21-.02-.09.02-1.49.95-4.22 2.79-.4.27-.76.41-1.08.4-.36-.01-1.04-.2-1.55-.37-.63-.2-1.12-.31-1.08-.66.02-.18.27-.36.75-.55 2.92-1.27 4.86-2.11 5.83-2.51 2.78-1.16 3.35-1.36 3.73-1.36.08 0 .27.02.39.12.1.08.13.19.14.27-.01.06.01.24 0 .38z"/>
-                </svg>
-                Watch on TG
-              </a>
-            ` : (isCompleted ? `
-              <button class="btn-tg-watch" onclick="uploadTaskToTelegram('${task.id}')" title="Upload to Telegram">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-                  <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69a.2.2 0 0 0-.05-.18c-.06-.05-.14-.03-.21-.02-.09.02-1.49.95-4.22 2.79-.4.27-.76.41-1.08.4-.36-.01-1.04-.2-1.55-.37-.63-.2-1.12-.31-1.08-.66.02-.18.27-.36.75-.55 2.92-1.27 4.86-2.11 5.83-2.51 2.78-1.16 3.35-1.36 3.73-1.36.08 0 .27.02.39.12.1.08.13.19.14.27-.01.06.01.24 0 .38z"/>
-                </svg>
-                Upload to TG
-              </button>
-            ` : '')}
-            ${isCompleted && task.download_url ? `
-              <a href="${task.download_url}" class="btn-download-file" download="${escapeHtml(task.friendly_filename || 'video.mp4')}">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                  <polyline points="7 10 12 15 17 10"></polyline>
-                  <line x1="12" y1="15" x2="12" y2="3"></line>
-                </svg>
-                Download File
-              </a>
-            ` : ''}
-            <button class="btn-task-del" onclick="deleteTask('${task.id}')" title="Delete from list">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <line x1="18" y1="6" x2="6" y2="18"></line>
-                <line x1="6" y1="6" x2="18" y2="18"></line>
-              </svg>
-            </button>
-          </div>
-        </div>
-      </div>
-    `;
-
-  }).join('');
-
-  container.innerHTML = cardsHtml;
+    if (!card) {
+      // Create new card and insert at the exact index
+      card = createCardElement(task);
+      const existingCards = container.querySelectorAll('.task-card');
+      if (index < existingCards.length) {
+        container.insertBefore(card, existingCards[index]);
+      } else {
+        container.appendChild(card);
+      }
+    } else {
+      // In-place live update: zero flicker, glides smoothly!
+      updateCardElement(card, task);
+    }
+  });
 }
 
 // --- Toast Alerts ---
