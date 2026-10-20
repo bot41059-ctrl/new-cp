@@ -1,0 +1,31 @@
+{
+  "name": "Universal Video Downloader & Uploader",
+  "description": "High-Speed Universal Video Downloader (ClassPlus, Drive, Mega, M3U8, MP4) with YouTube & Telegram 2GB MTProto Uploader",
+  "keywords": ["fastapi", "yt-dlp", "telegram", "mega", "gdown", "classplus"],
+  "buildpacks": [
+    {
+      "url": "https://github.com/heroku/heroku-buildpack-apt.git"
+    },
+    {
+      "url": "heroku/python"
+    }
+  ],
+  "env": {
+    "CLOUDFLARE_AUTH_API": {
+      "description": "Cloudflare Worker URL for Key Authentication",
+      "value": "https://yt-uplode.mypresonal65.workers.dev",
+      "required": false
+    },
+    "CP_TOKEN": {
+      "description": "Optional default ClassPlus Token",
+      "value": "",
+      "required": false
+    }
+  },
+  "formation": {
+    "web": {
+      "quantity": 1,
+      "size": "eco"
+    }
+  }
+}
