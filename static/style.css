@@ -2364,95 +2364,25 @@ input:focus, textarea:focus {
   color: #818cf8;
 }
 
-/* Feature Locked Visual States */
-.tab-btn.locked {
-  opacity: 0.55;
-  cursor: not-allowed;
-  position: relative;
-}
-
-.lock-badge-inline {
-  margin-left: 6px;
-  font-size: 0.75rem;
-}
-
+/* All Features Permanently Unlocked */
 .feature-locked-overlay {
-  position: absolute;
-  inset: 0;
-  background: rgba(9, 13, 22, 0.88);
-  backdrop-filter: blur(4px);
-  border-radius: var(--radius-lg);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  z-index: 20;
-  padding: 20px;
-  text-align: center;
+  display: none !important;
 }
-
-.feature-locked-overlay .lock-icon {
-  font-size: 2rem;
-}
-
-.feature-locked-overlay .lock-title {
-  font-size: 1rem;
-  font-weight: 800;
-  color: #fff;
-}
-
-.feature-locked-overlay .lock-desc {
-  font-size: 0.82rem;
-  color: var(--text-dim);
-  max-width: 320px;
-}
-
-.pill-disk.locked {
-  opacity: 0.5;
-  cursor: not-allowed !important;
-}
-
-.perm-tag {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 8px;
-  border-radius: 6px;
-  font-size: 0.72rem;
-  font-weight: 600;
-}
-
-.perm-tag.allowed {
-  background: rgba(16, 185, 129, 0.15);
-  color: #10b981;
-  border: 1px solid rgba(16, 185, 129, 0.3);
-}
-
-.perm-tag.denied {
-  background: rgba(239, 68, 68, 0.15);
-  color: #ef4444;
-  border: 1px solid rgba(239, 68, 68, 0.3);
-}
-
 .feature-locked {
-  opacity: 0.55;
-  pointer-events: none;
-  filter: grayscale(0.6);
-  position: relative;
+  opacity: 1 !important;
+  pointer-events: auto !important;
+  filter: none !important;
 }
-
-/* Mandatory First-Visit Gate Overlay */
-.modal-overlay.mandatory-gate {
-  backdrop-filter: blur(16px) !important;
-  background: rgba(4, 7, 14, 0.94) !important;
-  z-index: 999999 !important;
+.tab-btn.locked {
+  opacity: 1 !important;
+  cursor: pointer !important;
 }
-
-.modal-overlay.mandatory-gate .modal-license {
-  border: 1px solid rgba(59, 130, 246, 0.45);
-  box-shadow: 0 0 50px rgba(59, 130, 246, 0.25), 0 25px 60px rgba(0, 0, 0, 0.9);
-  animation: gatePulse 3s ease-in-out infinite alternate;
+.pill-disk.locked {
+  opacity: 1 !important;
+  cursor: pointer !important;
+}
+.btn-header-license {
+  display: none !important;
 }
 
 @keyframes gatePulse {

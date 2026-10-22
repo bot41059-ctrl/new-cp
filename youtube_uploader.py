@@ -27,6 +27,17 @@ if not CLOUDFLARE_AUTH_API and (BASE_DIR / "cloudflare_api.txt").exists():
         pass
 
 
+def format_bytes(bytes_count: Optional[float]) -> str:
+    """Format bytes into human-readable string."""
+    if not bytes_count or bytes_count <= 0:
+        return "0 B"
+    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+        if bytes_count < 1024.0:
+            return f"{bytes_count:.1f} {unit}"
+        bytes_count /= 1024.0
+    return f"{bytes_count:.1f} PB"
+
+
 def get_youtube_service(user_id: Optional[str] = None):
     """
     Initializes and returns an authenticated YouTube Data API service instance.

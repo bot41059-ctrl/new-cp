@@ -82,7 +82,6 @@ document.addEventListener('DOMContentLoaded', () => {
   fetchStats();
   checkYouTubeStatus();
   checkTelegramStatus();
-  checkLicenseStatus();
   startPolling();
 });
 
@@ -329,488 +328,21 @@ async function saveTelegramSettings(e) {
 }
 
 
-// --- License Status & Permissions System ---
-const CF_WORKER_URL = 'https://yt-uplode.mypresonal65.workers.dev';
-let isUserLicensed = false;
-
-async function callLicenseApi(endpoint, options = {}) {
-  // 1. Try Cloudflare Worker directly first (fastest, direct D1 access with CORS)
-  try {
-    const cfUrl = `${CF_WORKER_URL}${endpoint}`;
-    const res = await fetch(cfUrl, options);
-    const data = await res.json();
-    return { ok: res.ok, status: res.status, data: data };
-  } catch (err) {
-    console.log('Direct Cloudflare Worker call failed, trying local proxy:', err);
-  }
-
-  // 2. Fallback to local FastAPI proxy
-  try {
-    const res = await fetch(endpoint, options);
-    const data = await res.json();
-    return { ok: res.ok, status: res.status, data: data };
-  } catch (err) {
-    console.error('All license API endpoints failed:', err);
-    return {
-      ok: false,
-      status: 500,
-      data: { error: 'Network error connecting to license server. Please check internet connection.' }
-    };
-  }
-}
-
-async function checkLicenseStatus() {
-  const devId = getDeviceId();
-  const storedLic = getActiveLicense();
-  const storedKey = localStorage.getItem('omni_license_key') || (storedLic ? (storedLic.license_key || storedLic.key) : '');
-
-  const headerBtn = document.getElementById('btnOpenLicenseModal');
-  const headerDot = document.getElementById('headerLicenseDot');
-  const headerText = document.getElementById('headerLicenseText');
-
-  // If user has never activated a key: Open the Mandatory Access Gate immediately!
-  if (!storedKey) {
-    isUserLicensed = false;
-    currentPermissions = {
-      single: false, batch: false, cp_support: false,
-      yt_upload: false, tg_upload: false, disk_clean: false
-    };
-    if (headerDot) headerDot.className = 'license-dot amber';
-    if (headerText) headerText.textContent = '🔑 Enter Key';
-    hideActiveLicenseCard();
-    updateFeatureLocks(currentPermissions);
-    openLicenseModal(true); // Open Mandatory Gate!
-    return;
-  }
-
-  try {
-    const params = new URLSearchParams();
-    params.append('key', storedKey);
-    params.append('device_id', devId);
-
-    const res = await callLicenseApi(`/api/license/verify?${params.toString()}`);
-    const data = res.data || {};
-    activeLicenseData = data;
-
-    const isValid = res.ok && (data.valid || data.success || data.licensed);
-
-    if (isValid) {
-      isUserLicensed = true;
-      if (headerDot) headerDot.className = 'license-dot active';
-      if (headerText) headerText.textContent = data.user_name ? `✓ ${data.user_name}` : '✓ Active';
-      if (headerBtn) headerBtn.title = `License Active: ${data.user_name || 'User'}`;
-
-      currentPermissions = data.permissions || {
-        single: true, batch: true, cp_support: true,
-        yt_upload: true, tg_upload: true, disk_clean: true
-      };
-      saveActiveLicense({ ...data, license_key: storedKey });
-      renderActiveLicenseCard(data);
-      closeLicenseModal(null, true); // Unlock gate if open
-    } else {
-      isUserLicensed = false;
-      if (headerDot) headerDot.className = 'license-dot red';
-      if (headerText) headerText.textContent = '🔒 Expired';
-
-      currentPermissions = {
-        single: false, batch: false, cp_support: false,
-        yt_upload: false, tg_upload: false, disk_clean: false
-      };
-      hideActiveLicenseCard();
-      openLicenseModal(true); // Pop gate open because key expired/revoked
-      if (data.error) {
-        showToast(data.error, 'error');
-      }
-    }
-  } catch (err) {
-    console.log('License verification offline/error:', err);
-    if (storedLic && (storedLic.valid || storedLic.licensed || storedLic.success)) {
-      isUserLicensed = true;
-      currentPermissions = storedLic.permissions || currentPermissions;
-      if (headerDot) headerDot.className = 'license-dot active';
-      if (headerText) headerText.textContent = `✓ ${storedLic.user_name || 'Active'}`;
-      renderActiveLicenseCard(storedLic);
-    }
-  }
-
-  updateFeatureLocks(currentPermissions);
-}
-
-function renderActiveLicenseCard(data) {
-  const card = document.getElementById('licenseActiveCard');
-  const badge = document.getElementById('licActiveBadge');
-  const expiry = document.getElementById('licExpiryText');
-  const userVal = document.getElementById('licUserNameVal');
-  const devVal = document.getElementById('licDeviceIdVal');
-  const tagsContainer = document.getElementById('licPermsTags');
-
-  if (!card) return;
-  card.classList.remove('hidden');
-
-  if (badge) badge.textContent = '● LICENSED';
-  if (expiry) {
-    if (!data.expires_at || data.expires_at === -1) {
-      expiry.textContent = 'Valid: Lifetime';
-    } else {
-      const expDate = new Date(data.expires_at);
-      const remainingMs = data.expires_at - Date.now();
-      if (remainingMs > 0) {
-        const hours = Math.floor(remainingMs / (1000 * 60 * 60));
-        const days = Math.floor(hours / 24);
-        if (days >= 1) {
-          expiry.textContent = `Expires: ${days}d ${hours % 24}h (${expDate.toLocaleDateString()})`;
-        } else {
-          expiry.textContent = `Expires: ${hours}h (${expDate.toLocaleTimeString()})`;
-        }
-      } else {
-        expiry.textContent = 'Status: Expired';
-        if (badge) {
-          badge.textContent = '● EXPIRED';
-          badge.style.background = 'rgba(239, 68, 68, 0.2)';
-          badge.style.color = '#ef4444';
-        }
-      }
-    }
-  }
-
-  if (userVal) userVal.textContent = data.user_name || 'Active User';
-  if (devVal) devVal.textContent = data.device_id || getDeviceId();
-
-  if (tagsContainer) {
-    const features = [
-      { key: 'single', label: 'Single Video' },
-      { key: 'batch', label: 'Batch Download' },
-      { key: 'cp_support', label: 'ClassPlus DRM' },
-      { key: 'yt_upload', label: 'YouTube Upload' },
-      { key: 'tg_upload', label: 'Telegram Upload' },
-      { key: 'disk_clean', label: 'Disk Clean' }
-    ];
-    tagsContainer.innerHTML = features.map(f => {
-      const allowed = data.permissions && data.permissions[f.key];
-      const cls = allowed ? 'allowed' : 'denied';
-      const icon = allowed ? '✓' : '✕';
-      return `<span class="perm-tag ${cls}">${icon} ${f.label}</span>`;
-    }).join('');
-  }
-}
-
-function hideActiveLicenseCard() {
-  const card = document.getElementById('licenseActiveCard');
-  if (card) card.classList.add('hidden');
-}
-
-function updateFeatureLocks(perms) {
-  if (!perms) return;
-
-  // Single Video Tab
-  const singleBtn = document.getElementById('tabSingleBtn');
-  if (singleBtn) {
-    if (!perms.single) {
-      singleBtn.classList.add('locked');
-      singleBtn.setAttribute('title', '🔒 Locked by license');
-    } else {
-      singleBtn.classList.remove('locked');
-      singleBtn.removeAttribute('title');
-    }
-  }
-
-  // Batch Video Tab
-  const batchBtn = document.getElementById('tabBatchBtn');
-  if (batchBtn) {
-    if (!perms.batch) {
-      batchBtn.classList.add('locked');
-      batchBtn.setAttribute('title', '🔒 Locked by license');
-    } else {
-      batchBtn.classList.remove('locked');
-      batchBtn.removeAttribute('title');
-    }
-  }
-
-  // ClassPlus / DRM Tab
-  const cpBtn = document.getElementById('tabCpSignerBtn');
-  if (cpBtn) {
-    if (!perms.cp_support) {
-      cpBtn.classList.add('locked');
-      cpBtn.setAttribute('title', '🔒 Locked by license');
-    } else {
-      cpBtn.classList.remove('locked');
-      cpBtn.removeAttribute('title');
-    }
-  }
-
-  // YouTube Auto-Upload Box (Single & Batch)
-  const singleYt = document.getElementById('singleYtUpload');
-  if (singleYt) {
-    if (!perms.yt_upload) {
-      singleYt.disabled = true;
-      singleYt.checked = false;
-      const box = singleYt.closest('.youtube-upload-box');
-      if (box) box.classList.add('feature-locked');
-    } else {
-      singleYt.disabled = false;
-      const box = singleYt.closest('.youtube-upload-box');
-      if (box) box.classList.remove('feature-locked');
-    }
-  }
-  const batchYt = document.getElementById('batchYtUpload');
-  if (batchYt) {
-    if (!perms.yt_upload) {
-      batchYt.disabled = true;
-      batchYt.checked = false;
-      const box = batchYt.closest('.youtube-upload-box');
-      if (box) box.classList.add('feature-locked');
-    } else {
-      batchYt.disabled = false;
-      const box = batchYt.closest('.youtube-upload-box');
-      if (box) box.classList.remove('feature-locked');
-    }
-  }
-
-  // Telegram Auto-Upload Box (Single & Batch)
-  const singleTg = document.getElementById('singleTgUpload');
-  if (singleTg) {
-    if (!perms.tg_upload) {
-      singleTg.disabled = true;
-      singleTg.checked = false;
-      const box = singleTg.closest('.telegram-upload-box');
-      if (box) box.classList.add('feature-locked');
-    } else {
-      singleTg.disabled = false;
-      const box = singleTg.closest('.telegram-upload-box');
-      if (box) box.classList.remove('feature-locked');
-    }
-  }
-  const batchTg = document.getElementById('batchTgUpload');
-  if (batchTg) {
-    if (!perms.tg_upload) {
-      batchTg.disabled = true;
-      batchTg.checked = false;
-      const box = batchTg.closest('.telegram-upload-box');
-      if (box) box.classList.add('feature-locked');
-    } else {
-      batchTg.disabled = false;
-      const box = batchTg.closest('.telegram-upload-box');
-      if (box) box.classList.remove('feature-locked');
-    }
-  }
-
-  // Disk Clean Pill
-  const diskPill = document.querySelector('.pill-disk');
-  if (diskPill) {
-    if (!perms.disk_clean) {
-      diskPill.classList.add('locked');
-      diskPill.setAttribute('title', '🔒 Disk clean locked by license');
-    } else {
-      diskPill.classList.remove('locked');
-      diskPill.setAttribute('title', 'Auto-cleans files older than 1hr. Click to free space now!');
-    }
-  }
-}
-
-// --- Modal Handlers ---
-function openLicenseModal(isGate = false) {
-  const overlay = document.getElementById('licenseModalOverlay');
-  const devInp = document.getElementById('licenseDeviceIdInput');
-  const userInp = document.getElementById('licenseUserNameInput');
-  const keyInp = document.getElementById('licenseKeyInput');
-  const adminLink = document.getElementById('adminPortalLink');
-  const closeBtn = document.getElementById('btnLicenseModalClose');
-  const title = document.getElementById('licenseModalTitle');
-  const subtitle = document.getElementById('licenseModalSubtitle');
-
-  if (devInp) devInp.value = getDeviceId();
-  if (userInp) userInp.value = localStorage.getItem('omni_user_name') || '';
-  if (keyInp) keyInp.value = localStorage.getItem('omni_license_key') || '';
-  if (adminLink) {
-    adminLink.href = `${CF_WORKER_URL}/admin`;
-  }
-
-  if (isGate || !isUserLicensed) {
-    if (closeBtn) closeBtn.style.display = 'none'; // Hide close button for gate!
-    if (title) title.textContent = '🔐 OmniStream Access Gate';
-    if (subtitle) subtitle.textContent = 'Please enter your Access Key to unlock the website';
-    if (overlay) overlay.classList.add('mandatory-gate');
-  } else {
-    if (closeBtn) closeBtn.style.display = '';
-    if (title) title.textContent = 'Device Access & License Key';
-    if (subtitle) subtitle.textContent = 'Manage your active license & device details';
-    if (overlay) overlay.classList.remove('mandatory-gate');
-  }
-
-  if (overlay) overlay.classList.remove('hidden');
-}
-
-function closeLicenseModal(e, force = false) {
-  if (!force && !isUserLicensed) {
-    showToast('Please activate a valid Access Key to enter the website.', 'warning');
-    return;
-  }
-  if (!force && e && e.target && e.target.id !== 'licenseModalOverlay' && !e.target.classList.contains('btn-modal-close')) {
-    return;
-  }
-  const overlay = document.getElementById('licenseModalOverlay');
-  if (overlay) overlay.classList.add('hidden');
-}
-
-function copyDeviceId() {
-  const devId = getDeviceId();
-  navigator.clipboard.writeText(devId).then(() => {
-    showToast('✓ Device ID copied to clipboard! Send to admin.', 'success');
-  }).catch(() => {
-    const devInp = document.getElementById('licenseDeviceIdInput');
-    if (devInp) {
-      devInp.select();
-      document.execCommand('copy');
-      showToast('✓ Device ID copied!', 'success');
-    }
-  });
-}
-
-function openKeyRequestModal() {
-  const licOverlay = document.getElementById('licenseModalOverlay');
-  if (licOverlay) licOverlay.classList.add('hidden');
-
-  const reqOverlay = document.getElementById('keyRequestModalOverlay');
-  const reqDevInp = document.getElementById('reqDeviceIdInput');
-  const reqNameInp = document.getElementById('reqNameInput');
-
-  if (reqDevInp) reqDevInp.value = getDeviceId();
-  if (reqNameInp) reqNameInp.value = localStorage.getItem('omni_user_name') || '';
-  if (reqOverlay) reqOverlay.classList.remove('hidden');
-}
-
-function closeKeyRequestModal(e) {
-  if (e && e.target && e.target.id !== 'keyRequestModalOverlay' && !e.target.classList.contains('btn-modal-close') && !e.target.classList.contains('btn-secondary')) {
-    return;
-  }
-  const reqOverlay = document.getElementById('keyRequestModalOverlay');
-  if (reqOverlay) reqOverlay.classList.add('hidden');
-}
-
-async function handleLicenseActivation(e) {
-  e.preventDefault();
-  const keyInput = document.getElementById('licenseKeyInput');
-  const nameInput = document.getElementById('licenseUserNameInput');
-  const btn = document.getElementById('btnActivateLicense');
-
-  const key = (keyInput.value || '').trim().toUpperCase();
-  const userName = (nameInput.value || '').trim();
-  const deviceId = getDeviceId();
-
-  if (!key) {
-    showToast('Please enter an Access Key (e.g. OMNI-XXXX-XXXX-XXXX)', 'error');
-    keyInput.focus();
-    return;
-  }
-
-  btn.disabled = true;
-  btn.textContent = 'Activating...';
-
-  try {
-    const res = await callLicenseApi('/api/license/activate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        key: key,
-        device_id: deviceId,
-        user_name: userName || 'User'
-      })
-    });
-
-    const data = res.data || {};
-    const isSuccess = res.ok && (data.valid || data.success || data.licensed);
-
-    if (isSuccess) {
-      isUserLicensed = true;
-      localStorage.setItem('omni_license_key', key);
-      if (userName) localStorage.setItem('omni_user_name', userName);
-      saveActiveLicense({ ...data, license_key: key });
-
-      showToast('🎉 Access Granted! License Activated on this device.', 'success');
-      await checkLicenseStatus();
-      setTimeout(() => {
-        closeLicenseModal(null, true);
-      }, 500);
-    } else {
-      showToast(data.error || data.detail || 'Activation failed. Invalid or expired key.', 'error');
-    }
-  } catch (err) {
-    showToast('Network error while activating license.', 'error');
-  } finally {
-    btn.disabled = false;
-    btn.innerHTML = `
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-        <polyline points="20 6 9 17 4 12"></polyline>
-      </svg>
-      Activate on this Device
-    `;
-  }
-}
-
-async function handleKeyRequestSubmit(e) {
-  e.preventDefault();
-  const devId = getDeviceId();
-  const nameInput = document.getElementById('reqNameInput');
-  const durationSelect = document.getElementById('reqDurationSelect');
-  const btn = document.getElementById('btnSubmitKeyReq');
-
-  const name = (nameInput.value || '').trim();
-  const duration = durationSelect ? durationSelect.value : '24h';
-
-  if (!name) {
-    showToast('Please enter your name.', 'error');
-    return;
-  }
-
-  btn.disabled = true;
-  btn.textContent = 'Submitting...';
-
-  try {
-    const res = await callLicenseApi('/api/license/request', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        device_id: devId,
-        user_name: name,
-        duration: duration,
-        requested_features: 'single,batch,cp_support,yt_upload,tg_upload,disk_clean'
-      })
-    });
-    const data = res.data || {};
-    if (res.ok && (data.success || data.message)) {
-      showToast('✓ Request sent to admin! Admin will review and provide your key.', 'success');
-      localStorage.setItem('omni_user_name', name);
-      closeKeyRequestModal();
-      openLicenseModal(true);
-    } else {
-      showToast(data.detail || data.error || 'Failed to submit request.', 'error');
-    }
-  } catch (err) {
-    showToast('Network error submitting request.', 'error');
-  } finally {
-    btn.disabled = false;
-    btn.textContent = 'Submit Request';
-  }
-}
+// --- License System Removed (All Features Free & Unlocked) ---
+let isUserLicensed = true;
+let isLicenseEnforced = false;
+function updateFeatureLocks() {}
+function checkLicenseStatus() {}
+function openLicenseModal() {}
+function closeLicenseModal() {}
+function openKeyRequestModal() {}
+function closeKeyRequestModal() {}
+function handleLicenseActivation(e) { if (e) e.preventDefault(); }
+function handleKeyRequestSubmit(e) { if (e) e.preventDefault(); }
+function copyDeviceId() {}
 
 // --- Tab Switching ---
 function switchTab(tab) {
-  if (tab === 'single' && !currentPermissions.single) {
-    showToast('Single Video download is locked by your license key.', 'warning');
-    openLicenseModal();
-    return;
-  }
-  if (tab === 'batch' && !currentPermissions.batch) {
-    showToast('Batch download is locked by your license key.', 'warning');
-    openLicenseModal();
-    return;
-  }
-  if (tab === 'cpsigner' && !currentPermissions.cp_support) {
-    showToast('ClassPlus DRM extraction is locked by your license key.', 'warning');
-    openLicenseModal();
-    return;
-  }
-
   currentTab = tab;
   const singleBtn = document.getElementById('tabSingleBtn');
   const batchBtn = document.getElementById('tabBatchBtn');
@@ -886,11 +418,6 @@ function togglePasswordVisibilityDirect(inputId, iconId) {
 
 async function handleCpSignerSubmit(e) {
   e.preventDefault();
-  if (!currentPermissions.cp_support) {
-    showToast('ClassPlus DRM extraction is locked by your license key.', 'warning');
-    openLicenseModal();
-    return;
-  }
 
   const urlInput = document.getElementById('cpUrlInput');
   const tokenInput = document.getElementById('cpTokenInput');
@@ -1037,11 +564,6 @@ function downloadDirectCp() {
 }
 
 async function addCpToOmniQueue() {
-  if (!currentPermissions.cp_support || !currentPermissions.single) {
-    showToast('ClassPlus DRM and Single Download permissions are required.', 'warning');
-    openLicenseModal();
-    return;
-  }
   if (!currentCpExtractedData || !currentCpExtractedData.url) {
     showToast('No URL to queue', 'error');
     return;
@@ -1077,11 +599,6 @@ async function addCpToOmniQueue() {
 }
 
 async function addCpDrmToOmniQueue() {
-  if (!currentPermissions.cp_support || !currentPermissions.single) {
-    showToast('ClassPlus DRM and Single Download permissions are required.', 'warning');
-    openLicenseModal();
-    return;
-  }
   if (!currentCpExtractedData || !currentCpExtractedData.MPD) {
     showToast('No DRM MPD to queue', 'error');
     return;
@@ -1216,11 +733,6 @@ function updateBatchCount() {
 // --- Submit Single Download ---
 async function handleSingleSubmit(e) {
   e.preventDefault();
-  if (!currentPermissions.single) {
-    showToast('Single Video download is locked by your license key.', 'warning');
-    openLicenseModal();
-    return;
-  }
 
   const urlInput = document.getElementById('singleUrl');
   const nameInput = document.getElementById('singleName');
@@ -1234,16 +746,6 @@ async function handleSingleSubmit(e) {
   const customToken = document.getElementById('singleToken')?.value.trim() || null;
   const threadsVal = parseInt(document.getElementById('singleThreads')?.value || '16', 10);
   const tgConfig = getTelegramConfig();
-
-  if (ytUpload && !currentPermissions.yt_upload) {
-    showToast('YouTube upload is locked on your license.', 'warning');
-    return;
-  }
-
-  if (tgUpload && !currentPermissions.tg_upload) {
-    showToast('Telegram upload is locked on your license.', 'warning');
-    return;
-  }
 
   if (tgUpload && (!tgConfig.bot_token || !tgConfig.api_id || !tgConfig.api_hash)) {
     showToast('Please configure Telegram Bot Token & API keys first!', 'error');
@@ -1364,11 +866,6 @@ async function handleSingleSubmit(e) {
 // --- Submit Batch Download ---
 async function handleBatchSubmit(e) {
   e.preventDefault();
-  if (!currentPermissions.batch) {
-    showToast('Batch download is locked by your license key.', 'warning');
-    openLicenseModal();
-    return;
-  }
 
   const textArea = document.getElementById('batchText');
   const resInput = document.querySelector('input[name="batchRes"]:checked');
@@ -1381,16 +878,6 @@ async function handleBatchSubmit(e) {
   const defaultToken = document.getElementById('batchToken')?.value.trim() || null;
   const batchThreadsVal = parseInt(document.getElementById('batchThreads')?.value || '16', 10);
   const tgConfig = getTelegramConfig();
-
-  if (ytUpload && !currentPermissions.yt_upload) {
-    showToast('YouTube upload is locked on your license.', 'warning');
-    return;
-  }
-
-  if (tgUpload && !currentPermissions.tg_upload) {
-    showToast('Telegram upload is locked on your license.', 'warning');
-    return;
-  }
 
   if (tgUpload && (!tgConfig.bot_token || !tgConfig.api_id || !tgConfig.api_hash)) {
     showToast('Please configure Telegram Bot Token & API keys first!', 'error');
@@ -2084,11 +1571,6 @@ async function uploadTaskToTelegram(taskId) {
 }
 
 async function cleanDiskStorage() {
-  if (!currentPermissions.disk_clean) {
-    showToast('Disk cleanup is locked by your license key.', 'warning');
-    openLicenseModal();
-    return;
-  }
   if (!confirm("Are you sure you want to clean your disk storage? Your downloaded video files will be permanently deleted to free space.")) {
     return;
   }
