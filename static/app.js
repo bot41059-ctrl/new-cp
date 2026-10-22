@@ -329,8 +329,7 @@ async function saveTelegramSettings(e) {
 
 
 // --- License System Removed (All Features Free & Unlocked) ---
-let isUserLicensed = true;
-let isLicenseEnforced = false;
+var isUserLicensed = true;
 function updateFeatureLocks() {}
 function checkLicenseStatus() {}
 function openLicenseModal() {}
